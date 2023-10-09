@@ -11,6 +11,9 @@ public:
   K30(HardwareSerial * serial);
   K30(SoftwareSerial * swserial);
 
+  void setSerial(HardwareSerial *serial);
+  void setSerial(SoftwareSerial *serial);
+
   boolean getSample(float * result);
 
 private:
@@ -23,7 +26,7 @@ private:
   uint8_t read();
   void write(uint8_t * value, int size);
   void write(uint8_t value);
-
+  
   uint16_t co2_CRC16 (const uint8_t *nData, uint16_t wLength);
   boolean co2ValidResponse(uint8_t * response);
   uint16_t co2GetValue(uint8_t * response);

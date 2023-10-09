@@ -10,6 +10,16 @@ K30::K30(SoftwareSerial * swserial){
   this->hwserial = NULL;
 }
 
+void K30::setSerial(HardwareSerial * serial) {
+  this->swserial = NULL;
+  this->hwserial = serial;
+}
+
+void K30::setSerial(SoftwareSerial * serial) {
+  this->swserial = serial;
+  this->hwserial = NULL;
+}
+
 boolean K30::getSample(float * result){
   resetSerial();
   boolean ret = requestCO2Data(result);
