@@ -118,7 +118,7 @@ boolean K30::requestCO2Data(float * co2_ppm){
 
 // sends the request command
 // returns true the sensor starts responding within 50ms
-boolean K30::co2SendRequest(uint8_t * request){
+boolean K30::co2SendRequest(uint8_t * request, uint8_t numRequestBytes){
   // before sending the command, take some steps
   // to ensure that that the input buffer is empty
   Stream * s = swserial ? (Stream *) swserial : (Stream *) hwserial;
@@ -126,14 +126,20 @@ boolean K30::co2SendRequest(uint8_t * request){
   delay(50);
   clearCO2SerialInput();
 
-  write(request, 7);
+  // Serial.printf("Sending Request (%d)\r\n", numRequestBytes);  
+  // for (uint8_t rr = 0; rr < numRequestBytes; rr++) {
+  //   Serial.printf("%02x ", request[rr]);          
+  // }
+  // Serial.println();
+
+  write(request, numRequestBytes);
   unsigned long start = millis();
   const long timeout_interval = 50;
 
   while(1){
     unsigned long currentMillis = millis();
 
-    if(s->available()){
+    if(s->available()) {
       // exit with true as soon as you get some bytes back
       return true;
     }
@@ -147,7 +153,7 @@ boolean K30::co2SendRequest(uint8_t * request){
   return false;
 }
 
-boolean K30::co2ConsumeResponse(uint8_t * response){
+boolean K30::co2ConsumeResponse(uint8_t * response, uint8_t numResponseBytesExpected){
   // expect a response that starts with 0xFE
   // expect a response that is 7 bytes long
   // expect a response to complete within 100ms
@@ -155,7 +161,7 @@ boolean K30::co2ConsumeResponse(uint8_t * response){
   Stream * s = swserial ? (Stream *) swserial : (Stream *) hwserial;
   unsigned long start = millis();
   const long timeout_interval = 100;
-  while(bytes_received < 7){
+  while(bytes_received < numResponseBytesExpected){
     unsigned long currentMillis = millis();
     if(currentMillis - start >= timeout_interval) {
       return false;
@@ -185,6 +191,16 @@ uint16_t K30::co2GetValue(uint8_t * response){
   return ret;  // return the result
 }
 
+uint32_t K30::abcGetValue(uint8_t * response) {
+  uint8_t high = response[3]; // high byte for value is 4th byte in packet in the packet
+  uint8_t low  = response[4]; // low byte for value is 5th byte in the packet
+
+  uint16_t ret = high;
+  ret <<= 8;   // shift the low byte into the high byte
+  ret |= low;  // mask in the low byte
+  return ret;  // return the result  
+}
+
 boolean K30::co2ValidResponse(uint8_t * response){
   uint16_t crc = response[6] * 256 + response[5];
   if(co2_CRC16(response, 5) != crc){
@@ -202,6 +218,143 @@ boolean K30::co2ValidResponse(uint8_t * response){
   }
 
   return true;
+}
+
+boolean K30::readABCValidResponse(uint8_t * response) {
+  uint16_t crc = response[6] * 256 + response[5];
+  if(co2_CRC16(response, 5) != crc){
+    // Serial.printf("ABC Read CRC Check Failed. Calculated %04x. Expected %04x\r\n", co2_CRC16(response, 6), crc);
+    return false;
+  }
+
+  return true;
+}
+
+boolean K30::readABCPeriod(uint32_t * result) {
+  boolean ret = false;
+
+  uint8_t readABC[] = {0xFE, 0x03, 0x00, 0x1F, 0x00, 0x01, 0xA1, 0xC3};  // Command packet to read ABC Period
+  uint8_t response[] = {0,0,0,0,0,0,0};                                  // Create an array to store the response
+
+  // try up to retry times
+  const uint8_t retries = sizeof(readABC);
+
+  for(uint8_t ii = 0; ii < retries; ii++){
+    if(co2SendRequest(readABC, sizeof(readABC)/sizeof(readABC[0]))) {
+      // Serial.println("Sent Read ABC command");
+      // there is the beginning of a response at least
+      if(co2ConsumeResponse(response)){
+        // Serial.println("Got Read ABC Response");
+        // for (uint8_t rr = 0; rr < sizeof(response) / sizeof(response[0]); rr++) {
+        //   Serial.printf("%02x ", response[rr]);          
+        // }
+        // Serial.println();
+        // there's a complete response at least
+        if(readABCValidResponse(response)){
+          // there's a valid response, we have a winner
+          *result = abcGetValue(response);
+          ret = true;
+          break;
+        }
+      }
+    }
+
+    // attempt to re-synchronize
+    // Serial.println(F("Info: Attempting to resynchronize with CO2 sensor"));
+    for(uint8_t jj = 0; jj <= ii; jj++){
+      // send out a variable number of padding bytes in order to brute-force resynchronize the sensor
+      // eventually the request message should be received by the sensor correctly
+      write(0xff);
+    }
+
+  }
+
+  return ret;
+}
+
+boolean K30::enableABC(uint16_t periodInHours) {
+  boolean ret = false;  
+  uint8_t _enableABC[] = {0xFE, 0x06, 0x00, 0x1F, 0x00, 0x00, 0xAC, 0x03};  // command to write the value 0 to the ABC period
+  uint8_t response[] = {0,0,0,0,0,0,0,0}; 
+
+  uint8_t highByte = (periodInHours >> 8) & 0xFF;
+  uint8_t lowByte = periodInHours & 0xFF;
+  _enableABC[4] = highByte;
+  _enableABC[5] = lowByte;
+  uint16_t crc = co2_CRC16(_enableABC, 6);
+  highByte = (crc >> 8) & 0xff;
+  lowByte = crc & 0xff;
+  _enableABC[6] = lowByte;
+  _enableABC[7] = highByte;
+
+  // try up to retry times
+  const uint8_t retries = sizeof(_enableABC);
+
+  for(uint8_t ii = 0; ii < retries; ii++){
+    if(co2SendRequest(_enableABC, 8)){
+      // there is the beginning of a response at least
+      if(co2ConsumeResponse(response, 8)){
+        // there's a complete response at least
+        if(co2ResponseMatchesRequest(_enableABC, response, 8)){                    
+          ret = true;
+          break;
+        }
+      }
+    }
+
+    // attempt to re-synchronize
+    // Serial.println(F("Info: Attempting to resynchronize with CO2 sensor"));
+    for(uint8_t jj = 0; jj <= ii; jj++){
+      // send out a variable number of padding bytes in order to brute-force resynchronize the sensor
+      // eventually the request message should be received by the sensor correctly
+      write(0xff);
+    }
+  }
+
+  return ret;
+}
+
+boolean K30::disableABC(void) {
+  boolean ret = false;  
+  uint8_t _disableABC[] = {0xFE, 0x06, 0x00, 0x1F, 0x00, 0x00, 0xAC, 0x03};  // command to write the value 0 to the ABC period
+  uint8_t response[] = {0,0,0,0,0,0,0,0}; 
+  // try up to retry times
+  const uint8_t retries = sizeof(_disableABC);
+
+  for(uint8_t ii = 0; ii < retries; ii++){
+    if(co2SendRequest(_disableABC, 8)){
+      // there is the beginning of a response at least
+      if(co2ConsumeResponse(response, 8)){
+        // there's a complete response at least
+        if(co2ResponseMatchesRequest(_disableABC, response, 8)){                    
+          ret = true;
+          break;
+        }
+      }
+    }
+
+    // attempt to re-synchronize
+    // Serial.println(F("Info: Attempting to resynchronize with CO2 sensor"));
+    for(uint8_t jj = 0; jj <= ii; jj++){
+      // send out a variable number of padding bytes in order to brute-force resynchronize the sensor
+      // eventually the request message should be received by the sensor correctly
+      write(0xff);
+    }
+  }
+
+  return ret;
+}
+
+boolean K30::co2ResponseMatchesRequest(uint8_t * request, uint8_t * response, uint8_t num) {
+  boolean ret = true;
+  for (uint16_t ii = 0; ii < (num & 0xff); ii++) {
+    if (request[ii] != response[ii]) {
+      // Serial.printf("[%02x <-> %02x] ", request[ii], response[ii]);
+      ret = false;
+    }
+  }
+  // Serial.println();
+  return ret;
 }
 
 uint16_t K30::co2_CRC16 (const uint8_t *nData, uint16_t wLength)
